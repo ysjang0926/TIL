@@ -45,7 +45,7 @@ from spending_brackets
 group by spending_range
 ```
 
-## 월별 거래액(GMV), 주문건단가(AOV), 각 지표의 월별(MoM) 증감율
+## 월별 거래액, 주문건단가, 각 지표의 월별 증감율
 ```sql
 with monthly_sales as (
   select format_timestamp('%Y-%m', purchase_date) as month
