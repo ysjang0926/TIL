@@ -62,42 +62,129 @@ from monthly_sales
 ```
 
 ## 월별 1차 카테고리별 구매고객수 + 해당 카테고리의 직전 3개월 내에서 구매고객수가 최고인 월,구매고객수,증감률
+이건 조금더 고민해봐야할듯
+* 하드코딩
 ```sql
-with category_saels as (
-select format_timestamp('%Y-%m', purchase_date) as month
-      ,b.name_1 as name_1st
-      ,count(distinct a.customer_id) as buyers
-from sales a
-left join category b on a.category_id = b.category_id
-group by month, name_1st
+with month_category_sales as (
+  select format_timestamp('%Y-%m', purchase_date) as month
+        ,b.name_1 as name_1st
+        ,count(distinct a.customer_id) as buyers
+  from sales a
+  left join category b on a.category_id = b.category_id
+  group by month, name_1
 )
-,highest_customers as (
-select
+,sales_with_lag as (
+  select month, name_1, buyers
+        ,lag(customer_count, 1) over (partition by category_1 order by month) as customer_count_lag_1
+        ,lag(customer_count, 2) over (partition by category_1 order by month) as customer_count_lag_2
+        ,lag(customer_count, 3) over (partition by category_1 order by month) as customer_count_lag_3
+  from month_category_sales
+)
+,max_last_3_months as (
+  select month, name_1, buyers
+        ,greatest(customer_count_lag_1, customer_count_lag_2, customer_count_lag_3) as max_customer_count
+        ,case when greatest(customer_count_lag_1, customer_count_lag_2, customer_count_lag_3) = customer_count then month
+              when greatest(customer_count_lag_1, customer_count_lag_2, customer_count_lag_3) = customer_count_lag_2 then lag(month, 2) over (partition by category_1 order by month)
+              when greatest(customer_count_lag_1, customer_count_lag_2, customer_count_lag_3) = customer_count_lag_3 then lag(month, 3) over (partition by category_1 order by month)
+              end as highest_month
+  from sales_with_lag
+)
+select month, name_1, buyers
+      ,highest_month as bf_top_month
+      ,max_customer_count as bf_top_buyers
+      ,(buyers - bf_top_buyers) / bf_top_buyers * 100 as growth_rate
+from max_last_3_months
+```
+
+* row_number
+-> 조금더 고민해보기
+
+
+  
+```sql
+with month_category_sales as (
+  select format_timestamp('%Y-%m', purchase_date) as month
+        ,b.name_1 as name_1st
+        ,count(distinct a.customer_id) as buyers
+  from sales a
+  left join category b on a.category_id = b.category_id
+  group by month, name_1
+)
+,sales_with_lag as (
+  select month, name_1st, buyers
+        ,lag(month, 1) over (partition by name_1st order by month) as prev_month,
+        ,lag(buyers, 1) over (partition by name_1st order by month) as prev_buyers
+        ,lag(month, 2) over (partition by name_1st order by month) as prev2_month
+        ,lag(buyers, 2) over (partition by name_1st order by month) as prev2_buyers
+        ,lag(month, 3) over (partition by name_1st order by month) as prev3_month
+        ,lag(buyers, 3) over (partition by name_1st order by month) as prev3_buyers
+  from category_sales
+)
+,ranked_sales as (
+  select month, name_1st, buyers
+        ,prev_month, prev_buyers
+        ,prev2_month, prev2_buyers
+        ,prev3_month, prev3_buyers
+        ,row_number() over (partition by month, name_1st order by buyers desc) as rn
+  from (
+      select month, name_1st, buyers
+      from sales_with_lag
+      union all
+      select name_1st, prev_month as month, prev_buyers as buyers
+      from sales_with_lag
+      union all
+      select name_1st, prev2_month as month, prev2_buyers as buyers
+      from sales_with_lag
+      union all
+      select name_1st, prev3_month as month, prev3_buyers as buyers
+      from sales_with_lag
+  ) as combined_data
 )
 ```
 
-
-
-category_growth AS (
-    SELECT
-        month,
+-- 각 카테고리별로 월별 데이터에서 고객수가 가장 많은 월을 찾습니다.
+ranked_sales as (
+    select
         category_1,
+        month as curr_month,
         customer_count,
-        LAG(customer_count, 1) OVER (PARTITION BY category_1 ORDER BY month) AS prev_month_count,
-        (customer_count - LAG(customer_count, 1) OVER (PARTITION BY category_1 ORDER BY month)) / LAG(customer_count, 1) OVER (PARTITION BY category_1 ORDER BY month) * 100 AS MoM_growth
-    FROM category_sales
-),
-highest_customers AS (
-    SELECT
-        category_1,
-        MAX(customer_count) AS highest_customer_count,
-        month AS highest_month
-    FROM category_sales
-    GROUP BY category_1
+        prev_month,
+        prev_customer_count,
+        prev2_month,
+        prev2_customer_count,
+        prev3_month,
+        prev3_customer_count,
+        row_number() over (partition by category_1, month order by customer_count desc) as rn
+    from (
+        select 
+            category_1,
+            month,
+            customer_count
+        from flattened_data
+        union all
+        select
+            category_1,
+            prev_month as month,
+            prev_customer_count as customer_count
+        from flattened_data
+        union all
+        select
+            category_1,
+            prev2_month as month,
+            prev2_customer_count as customer_count
+        from flattened_data
+        union all
+        select
+            category_1,
+            prev3_month as month,
+            prev3_customer_count as customer_count
+        from flattened_data
+    ) as combined_data
 )
-SELECT 
-    cg.*,
-    hc.highest_month,
-    hc.highest_customer_count
-FROM category_growth cg
-JOIN highest_customers hc ON cg.category_1 = hc.category_1 AND cg.customer_count = hc.highest_customer_count;
+-- 각 카테고리별로 직전 3개월 중 가장 높은 고객수를 가진 월을 선택합니다.
+select
+    category_1,
+    curr_month as highest_month,
+    customer_count as highest_customer_count
+from ranked_sales
+where rn = 1;
